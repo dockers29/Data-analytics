@@ -1,0 +1,528 @@
+---
+title: "Assignment 2 Web Scraping and Text Analysis"
+author: Muhammad Yudha Pratama, Nefertari Pramudhita, Nurwahid Najmuddin Ahmad, &
+  Dirga Imam Gozali Sumantri
+date: '2022-04-03'
+output:
+  html_document: default
+---
+# Setup
+```{r setup}
+library(rvest)
+library(glue)
+library(data.table)
+library(tibble)
+library(stringr)
+```
+
+# Tasks/Questions
+
+## 2.1 Web scraping
+
+```{r}
+#for the one AFTER 2016
+base <- read_html('https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm')
+df_urls<-data.table(NULL)
+urls<-html_nodes(base, ".col-lg-2 a+ a")
+urls<-html_attr(urls,"href")
+df_urls$url<-rbind(df_urls, urls)
+rm(base)
+
+#for the one BEFORE 2016
+#the earliest is 2000
+for (year in 2000:2016){
+old_url<-glue("https://www.federalreserve.gov/monetarypolicy/fomchistorical{year}.htm") 
+base<-read_html(old_url)
+urls_old<- html_nodes(base, xpath= "//*[text() = 'Statement']")
+urls_old<-html_attr(urls_old,"href")
+#cleaning (apparently they change the url after 2005, but its dynamic)
+if (year>2005)
+{urls_old<- str_replace(urls_old, "newsevents/press/monetary/", "newsevents/pressreleases/monetary") }
+temp_url<- data.table(NULL)
+temp_url$url<-urls_old
+df_urls <- rbind(df_urls, temp_url)
+
+rm(base)
+}
+
+df_urls
+
+```
+
+```{r}
+#will save data to object named DT
+DT <- data.table(NULL)
+#df_urls[97]
+for (i in 1:(nrow(df_urls)))
+{url<-df_urls[i]
+url<-glue("https://www.federalreserve.gov{url}")
+
+print(i)
+print(url)
+date <- str_extract(url, "\\d{8}")
+year <-str_extract(date, "\\d{4}")
+conts<-read_html(url)
+#there is slight change in formating in 2005
+if (date<20060000)
+  {conts<-html_nodes(conts,"p")}
+else
+  {conts<-html_nodes(conts,"#article p")}
+conts<-html_text(conts)
+
+for (j in 1: (length(conts)))
+{cont <- str_c (conts, collapse = " ")
+cont <- str_remove_all(cont, " \t")
+cont<-str_remove_all(cont, "\n")}
+
+temp_tb <- data.table(NULL)
+temp_tb$content <- cont
+temp_tb$dates <- date
+temp_tb$year <- year
+temp_tb$url <- url
+DT <- rbind(DT, temp_tb)
+print("OK")
+rm(conts)
+}
+```
+
+```{r}
+str(DT)
+# removing year 2022 and 2021
+library(data.table)
+DT <- DT[year != "2022",]
+DT <- DT[year != "2021",]
+DT$dates<- as.POSIXct(DT$dates, format="%Y%m%d")
+DT <- dplyr::arrange(DT, dates)
+write.csv(DT,"DT.csv", row.names = FALSE)
+```
+
+
+
+## 2.2 Bag-of-words approach and text preprocessing
+
+```{r}
+library(quanteda)
+DT <- read.csv("DT.csv")
+DTM <- as.character(DT$content)
+TOKS <- tokens(
+  DTM, remove_numbers = TRUE, remove_punct = TRUE, remove_symbols = TRUE,
+  remove_separators = TRUE, split_hyphens=TRUE, split_tags=TRUE
+)
+TOKS <- tokens_select(TOKS, min_nchar = 2L) #remove single character terms
+TOKS <- tokens_wordstem(TOKS, language="english")
+TOKS <- tokens_remove(TOKS, stopwords("english"))
+DTM <- dfm(TOKS)
+DTM <- dfm_select(DTM, min_nchar = 2, selection="remove", pattern=c("percent", "chairman", "fomc", "board"), valuetype="fixed") #remove domain specific words
+
+```
+
+computing TF-IDF scores
+```{r}
+DTM_tfidf <- dfm_tfidf(DTM)
+topfeatures(DTM_tfidf)
+```
+
+Removing the bottom 10% of lowest tf-idf score
+```{r}
+to_remove <- names( topfeatures(DTM_tfidf, decreasing = FALSE, 0.1*dim(DTM_tfidf)[2]) )
+DTM <- dfm_select(DTM, selection="remove", pattern=to_remove, valuetype="fixed")
+dim(DTM)[2] # the number of terms left
+
+```
+
+## 2.3 Plot the document length
+
+```{r}
+#Get date, text, and Governor
+library(dplyr)
+Gov<-read_html('https://en.wikipedia.org/wiki/Chair_of_the_Federal_Reserve')
+df_Gov<-data.table(NULL)
+table<-html_table(Gov)
+#table[2] 
+df_Gov<-table[2]
+df_Gov<-as.data.frame(df_Gov)
+#Arranging the table
+df_Gov<-df_Gov[-1,]
+df_Gov<-df_Gov[,-(1:2)]
+#convert data into the right type
+
+df_Gov$start_date<-as.Date(df_Gov$Term.of.office, format="%B %d,%Y")
+df_Gov$end_date<-as.Date(df_Gov$Term.of.office.1, format="%B %d,%Y")
+#change the incumbent one
+df_Gov$end_date[nrow(df_Gov)]<-Sys.Date()
+df_Gov
+
+
+```
+
+
+```{r}
+#DTM to dataframe
+DTM_df<-convert(DTM, to="data.frame")
+
+str(DT$dates)
+df_ready<- data.frame(datum = DT$dates,
+                      length = rowSums(DTM_df[,c(-1)]))
+df_ready
+```
+
+
+```{r}
+#attach chairman name on every text
+library(fuzzyjoin)
+
+df_ready<-fuzzy_left_join(
+  df_ready, df_Gov,
+  by = c("datum" = "start_date", "datum" = "end_date"),
+  match_fun = list(`>=`, `<=`)
+  )
+```
+
+```{r}
+library(ggplot2)
+cutoffs <- data.frame(Ref = c("Ben Bernanke" , "Jenet Yellen" , "Jerome Powell"),
+                   vals = as.Date(c("2006-02-01", "2014-02-03", "2018-02-05"),
+                   stringsAsFactors = FALSE))
+str(cutoffs)
+str(df_ready)
+#plot length and time
+ggplot() +
+  geom_point(data = df_ready, aes(x = as.Date(datum), y = length)) + 
+  geom_vline(data = cutoffs, mapping = aes(xintercept = vals, ), color = "red", size=1) + 
+  geom_text(mapping = aes(x = vals,
+                          y = 0,
+                          label = Ref,
+                          hjust = -0.1
+                          ),
+            data = cutoffs) +
+  geom_text(aes(x = as.Date("2000-01-01"), y = 0, label = "Alan Greenspan", hjust = -0.05)) +
+  labs(y = "Length of Text", x = "Date") 
+```
+
+
+During Bernanke's office which also saw the Fed switched to active stance, regular announcement was made by the FOMC to update on their inflation target (a lot of documents). The length of the document also saw an increased during this time. We suspect that because some crisis were also faced by the Fed (2008 global crisis and 2012 European debt crisis which has an indirect impact to US economy), hence more detailed measures were presented (shown by increase in document length). By then the document length seems to suggest a decrease and rising again in 2020 (coincidence with Covid). We suspect that the Fed also has more to present in their announcement regarding the pandemic.
+
+
+## 2.4 World cloud
+
+```{r}
+library(quanteda.textplots)
+library(wordcloud)
+library(quanteda.textstats)
+
+textplot_wordcloud(DTM, max_words= round(1/10*NCOL(DTM)), min_count = 50, random_order = FALSE, rotation = 0.25, color = RColorBrewer::brewer.pal(8, "Dark2"), max_size=5, min_size = 0.1)
+```
+
+
+```{r}
+#TF_IDF
+textplot_wordcloud(DTM_tfidf, max_words= round(1/10*NCOL(DTM)), min_count = 50, random_order = FALSE, rotation = 0.25, color = RColorBrewer::brewer.pal(8, "Dark2"), max_size=5, min_size = 0.1)
+```
+
+
+the TF_IDF tries measuring how relevant certain words are in a document (by giving more weights to the relevant words, while word counts measure how frequent words appear). For TF_IDF, frequent words appear does not mean high relevant, it could be the other way. It is not surprising to see that inflation, policy, and rate appears frequently because it relates to the central bank. While security and purchase are more relevant with specific documents.
+
+## 2.5 Sub Periods by Chairmans
+
+```{r}
+library(data.table)
+Subperiod_chair <- data.frame(as.matrix(DTM), dates = DT$dates)
+Period_Greenspan <- Subperiod_chair[as.Date(Subperiod_chair$dates) <= as.Date("2006-02-01"), -1069]
+Period_Greenspan <- colSums(Period_Greenspan)
+sort(Period_Greenspan, decreasing=TRUE)[1:10]
+
+```
+
+
+```{r}
+Period_Bernanke <- Subperiod_chair[as.Date(Subperiod_chair$dates) > as.Date("2006-02-01") & as.Date(Subperiod_chair$dates) <= as.Date("2014-02-01"), -1069]
+Period_Bernanke <- colSums(Period_Bernanke)
+sort(Period_Bernanke, decreasing=TRUE)[1:10]
+```
+
+
+```{r}
+Period_Yellen <- Subperiod_chair[as.Date(Subperiod_chair$dates) > as.Date("2014-02-01") & as.Date(Subperiod_chair$dates) < as.Date("2018-02-05"), -1069]
+Period_Yellen <- colSums(Period_Yellen)
+sort(Period_Yellen, decreasing=TRUE)[1:10]
+```
+
+```{r}
+Period_Powell <- Subperiod_chair[as.Date(Subperiod_chair$dates) > as.Date("2018-02-05"), -1069]
+Period_Powell <- colSums(Period_Powell)
+sort(Period_Powell, decreasing=TRUE)[1:10]
+```
+
+In relation to economic theory, the Fed has two mandate, which are price stabilization and pushing growth. During Greenspans' office, he followed a standard Taylor rule principle. However, a series of interest rate cuts were present as he also tried pushing for economic growth (especially after the 9-11 attack). This is also in an attempt to counter the deflation of asset price bubbles. Thus, the frequent words appear include utilizing monetary policy to push for growth by lowering down rate, yet still perform price stabilization mandate (monetary, policy, growth, rate appear more than inflation and price).
+Meanwhile, as expected, that during Ben Bernanke office, The Fed switched stance to active as inflation target of up to 2% was the priority (price stabilization). Thus the most frequent word appear are words related to inflation including price (second after Yellen). Inflation targeting framework continues until then which also saw the two successor (Yellen and Powell). But the two were more flexible in terms of the Fed sensitivity towards growth and inflation. If the economy needs stimulus, Yellen would lower interest rate so the economy grow and more labor would be absorbed. It was during this time that the US also saw its lowest unemployment rate at around 4% to 6% (labor as the second most appeared words).
+
+## 2.6 Sentiment Analysis
+The dictionary is lexicon_loughran in textdata package.
+```{r}
+library(textdata)
+library(SentimentAnalysis)
+library(tidytext)
+library(quanteda.dictionaries)
+library(quanteda.sentiment)
+library(ggplot2)
+```
+
+
+```{r}
+sentiment <- dfm(DTM, dictionary = data_dictionary_LoughranMcDonald)
+sent <- as.data.frame(sentiment)
+
+relfreq <- function(x){
+  x/sum(x)
+}
+sentiment <- as.data.frame(sentiment)
+sent <- as.data.frame(t(apply(as.matrix(sent[,-1]), 1, FUN = relfreq)))
+sent$dates <- DT$dates
+sent$text <- sentiment[,1]
+
+
+  
+```
+
+Plotting the sentiments by year
+Positive sentiment
+```{r}
+ggplot(data = sent, mapping = aes(x = as.Date(dates), y = POSITIVE))+
+  geom_point() +
+  xlab("Year")
+```
+
+
+Negative sentiment
+```{r}
+ggplot(data = sent, mapping = aes(x = as.Date(dates), y = NEGATIVE))+
+  geom_point() +
+  xlab("Year")
+```
+
+
+Uncertainty sentiment
+```{r}
+ggplot(data = sent, mapping = aes(x = as.Date(dates), y = UNCERTAINTY))+
+  geom_point() +
+  xlab("Year")
+```
+
+
+## 2.7 Effective Federal funds rate by sentiment measures
+```{r}
+library(httr)
+library(jsonlite)
+```
+
+```{r}
+query_list <- list( 
+                    api_key = "b7c33fd2d6c8048769068c30add88fb3",
+                    series_id = "DFF",
+                    file_type = "json"
+                  )
+
+data <- GET(
+          url = "https://api.stlouisfed.org/",
+          path = "fred/series/observations",
+          query = query_list
+           )
+
+data <- content(data, "text")
+data <- fromJSON(data)
+data <- data.table(data$observations)
+data[, date := as.Date(date, "%Y-%m-%d")]
+data[, value := as.numeric(value)]
+data$year <- substr(data$date,1, 4)
+data_fred <- data[year >=2000 & year < 2021,]
+```
+
+```{r}
+sentiment$dates <- DT$dates
+ggplot()+
+  geom_line(data = data_fred, mapping = aes(x = as.Date(date), y = value), color = "red")+
+  geom_point(data = sentiment, mapping = aes(x = as.Date(dates), y = UNCERTAINTY)) +
+  ylab("Uncertainty Count and Fed Fund Rates") +
+  xlab("Year")
+  
+```
+
+
+Here, we could see that below 2009, high number of Uncertainty sentiments seems to lead the uncertainty in the effective federal funds rate (high range of fed funds rate). Above 2009, it seems that high uncertainty correlates with lower the fed funds rate.
+
+## 2.8 Topic Modelling (LDA)
+```{r}
+library(topicmodels)
+DTM_TM <- convert(DTM, to = "topicmodels")
+
+TM.fit <- LDA(DTM_TM, 3, method="Gibbs", control=list(seed = 111))
+TM.res <- posterior(TM.fit)
+```
+
+```{r}
+library(wordcloud)
+PHI <- TM.res$terms
+PHI <- as.data.frame(PHI)
+set.seed(1234)
+wordcloud(words = names(PHI), freq = PHI[1,], min.freq = 0, scale = c(4,0.1),
+          random.order = FALSE, rot.per = 0.25,
+          colors = brewer.pal(8, "Dark2"))
+```
+
+Topic 1 seems to resemble capture monetary policy terms, such as Inflation, Econom, expectation.
+```{r}
+set.seed(1234)
+wordcloud(words = names(PHI), freq = PHI[2,], min.freq = 0, scale = c(4,0.1),
+          random.order = FALSE, rot.per = 0.25,
+          colors = brewer.pal(8, "Dark2"))
+```
+
+
+This second topics seems related to credit market terms. We could see the secure and mortgage.
+
+```{r}
+set.seed(1234)
+wordcloud(words = names(PHI), freq = PHI[3,], min.freq = 0, scale = c(4,0.1),
+          random.order = FALSE, rot.per = 0.25,
+          colors = brewer.pal(8, "Dark2"))
+```
+
+the third topic also related to monetary policy terms, so this third topic is highly similar with the first topic.
+
+## 2.9 Estimated Probability in each statement
+
+```{r}
+topic_prob <- as.data.frame(TM.res$topics)
+topic_prob$dates <- DT$dates
+names(topic_prob)
+names(topic_prob)[names(topic_prob) == "1"] <- "Topic1" 
+names(topic_prob)[names(topic_prob) == "2"] <- "Topic2" 
+names(topic_prob)[names(topic_prob) == "3"] <- "Topic3" 
+```
+
+
+```{r}
+ggplot(data = topic_prob) +
+  geom_line(mapping = aes(x = as.Date(dates), y = Topic1, group = 1, color = "Topic 1")) +
+  geom_line(mapping = aes(x = as.Date(dates), y = Topic2, group = 1, color = "Topic 2")) +
+  geom_line(mapping = aes(x = as.Date(dates), y = Topic3, group = 1, color = "Topic 3")) +
+  geom_vline(data = cutoffs, mapping = aes(xintercept = vals, ), color = "red", size=1) +
+  geom_text(mapping = aes(x = vals,
+                          y = 0,
+                          label = Ref,
+                          hjust = -0.1
+                          ),
+            data = cutoffs) +
+  geom_text(aes(x = as.Date("2000-01-01"), y = 0, label = "Alan Greenspan", hjust = -0.05)) +
+  ylab("Estimated Topic Probabilities") +
+  xlab("Year") 
+              
+```
+
+
+We could see the estimated probabilities for each topic in the timely manners, with the red vertical line representing the change in chairman. There are some notable differences here. Alan Greenspan seems to adopt more of Topic 3 compared to other chairmans. Jerome Powell employed more Topic 1 compared to other chairmans. The event which took place in January 2012 is depicted as the Topic shift in the graph during Ben Bernanke. Topic 2 is the most prominent in this shift, which means that the terms such as security and stability appear most in the statements. 
+
+## 2.10 Word Probabilities
+
+To calculate each word probabilities in each topic, we could multiply the estimated probabilities of words by topics (terms probabilities) and the estimated topics by document (topics probabilities).
+```{r}
+mat_terms <- as.matrix(TM.res$terms)
+mat_topics <- as.matrix(TM.res$topics)
+term_topics_prob <- as.data.frame(mat_topics%*%mat_terms)
+term_topics_prob$text <- sentiment$doc_id
+```
+
+```{r}
+term_topics_prob[which.max(as.numeric(term_topics_prob[, "inflat"])), c("text","inflat")]
+```
+
+Here, text 159 has the highest probability of the word inflat: the September 26, 2018 FED statement.
+
+
+## 2.11 Perplexity
+
+```{r}
+set.seed(111)
+train_ind <- sample(1:nrow(DTM_TM), 0.8*nrow(DTM_TM))
+perpl <- data.frame(N = 1:10, Perplexity = NA)
+for(K in 2:10){
+  TM.fit <- LDA(DTM_TM[train_ind,], K, method="Gibbs", control=list(seed = 111))
+  perpl[K, 2] <- perplexity(TM.fit, DTM_TM[-train_ind,])
+}
+perpl
+```
+Here, we could see that the number of topics that minimize the perplexity is K = 10.
+
+## 2.12 Random Forest
+
+```{r read the data}
+decision<- read.csv(file = 'FOMC_decision.csv') #note: download the file manually
+#DTM to dataframe
+DTM_df<-convert(DTM, to="data.frame")
+#ID for merge
+decision$ID <- seq_along(decision[,1])
+DTM_df$ID <- seq_along(DTM_df[,1])
+#join data
+join <- merge(DTM_df, decision, by="ID")
+```
+
+```{r cleaning data}
+#cleaning data
+names(join) <- gsub(" |-|/", "_", names(join)) # because some packages cannot deal with some special characters in the variables names
+names(join) <- gsub("\\(s\\)", "", names(join)) 
+#setnames(join, grep("^[0-9]", names(join), value=T), paste0("V", grep("^[0-9]", names(join), value=T)))  # some packages cannot deal with variables names starting with numbers:
+names(join)<-gsub("function","functions", names(join))
+names(join)<-gsub("next","nexts", names(join))
+
+```
+
+```{r make factor}
+get_factor <- function(x){
+  if (class(x) == "character"){
+    factor(x)
+  } else {
+    x
+  }
+}
+
+join[, names(join) == lapply(.SD, get_factor)]
+
+```
+
+```{r model random forest}
+library(randomForest)
+set.seed(321)
+#since we want to know only about weather they will lower the target rate or not, we can also group the hold and up as one category
+join$POLICY <- ifelse(join$POLICY == "down", 1, 0)
+join$POLICY<- as.factor(join$POLICY)
+RF <- randomForest(POLICY~. , data = join[3:length(join)], importance = TRUE, ntree=500)
+
+
+```
+we generate random forest model for identifying the statement that will NOT lower the target rate. the error rate based on the Out of Bag prediction that the model produce is 0.033. We also know that the sensitifity of the model is .958 and the specificity of the model is .968 . the precision of the model .9934.
+
+## 2.13 ROC plot
+we use all 180 statement on this model
+```{r exploring result}
+#ROC plot using oob
+par(mfrow = c(2,1))
+plot(RF$err.rate[,1], type = "l")
+plot(RF)
+
+#show AUC value
+#another one
+RF$err.rate[500,1]
+
+RF$confusion
+```
+based on the ROC curve plot we generate against the actual policy decision, the prediction on wether the FOMC will lowered the target rate in this model is good. AUC value is 0.9074
+
+
+## 2.14 Variable importance
+```{r variable importance}
+library(vip)
+vip(RF)
+```
+
+The 10 most important term in based on the model are:
+submit, lower, approv, director, discount, decreas, reduct, bank, rais, and action; respectively. We can also see the importance of each term does not differ significantly.
