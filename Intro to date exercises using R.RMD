@@ -1,0 +1,50 @@
+---
+title: "Introduction to Business Analytics with R"
+author: "Wahid Ahmad"
+date: "7/29/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+```{r creating date question 1-4}
+d<-'May 8, 2020'
+d_new<-as.Date(d, format = '%B %d, %Y')
+
+class(d_new)
+format(d_new, "%m/%d/%Y") #changing date format to mm/dd/yyyy
+
+```
+
+```{r qestion 5}
+if (!require(lubridate)){
+  install.packages("lubridate")
+  library(lubridate)
+}
+
+library(lubridate)
+
+```
+
+
+```{r qestion  6}
+d_year<-year(d_new)                  # Extracts just the year as a number
+d_month<-month(d_new)                 # Extracts the month as a number
+
+d_day<-day(d_new)                   # Extracts the day of the month as a number
+d_week<-wday(d_new) 
+week_num <-strftime(d_new, format = "%V") # Extracts the week of the date in 2020
+```
+
+```{r question 7}
+d25<- d_new + 25      #adding 25 days only to numeric
+d25
+difftime(d25, d_new)  #printing the difference in days, change units='weeks' for weeks
+```
+
